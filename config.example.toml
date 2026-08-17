@@ -219,8 +219,10 @@ subtitle_provider = "edge"
 # Windows example: ffmpeg_path = "C:\\path\\to\\ffmpeg.exe"
 # ffmpeg_path = ""
 
-# Leave unset to follow the app default (libx264). Hardware encoders are optional;
-# unsupported encoders automatically fall back to libx264.
+# Leave unset to auto-detect a hardware encoder (NVIDIA NVENC, macOS VideoToolbox)
+# when available, falling back to the stable CPU encoder libx264. You can also
+# override it at runtime with the VIDEO_CODEC environment variable. Hardware
+# encoders are optional; unsupported encoders automatically fall back to libx264.
 # Available values: "libx264", "h264_nvenc", "h264_amf", "h264_qsv",
 # "h264_mf", "h264_videotoolbox".
 # video_codec = "libx264"

@@ -55,12 +55,16 @@ class TestVideoService(unittest.TestCase):
         self.original_app_config = dict(config.app)
         self.test_img_path = os.path.join(resources_dir, "1.png")
         vd._runtime_disabled_video_codecs.clear()
+        vd._resolved_auto_video_codec = None
+        vd._nvidia_gpu_state = None
         vd._ffmpeg_encoder_exists.cache_clear()
 
     def tearDown(self):
         config.app.clear()
         config.app.update(self.original_app_config)
         vd._runtime_disabled_video_codecs.clear()
+        vd._resolved_auto_video_codec = None
+        vd._nvidia_gpu_state = None
         vd._ffmpeg_encoder_exists.cache_clear()
 
     def test_delete_files_deduplicates_paths_and_ignores_missing_files(self):
@@ -431,23 +435,97 @@ class TestVideoService(unittest.TestCase):
         with patch.object(vd, "_ffmpeg_encoder_exists", return_value=False):
             self.assertEqual(vd._get_effective_video_codec(), "libx264")
 
-    def test_get_configured_video_codec_uses_stable_default_when_unset(self):
+    def test_get_configured_video_codec_uses_auto_sentinel_when_unset(self):
         """
-        WebUI 的“默认”模式不会持久化 video_codec。后端必须在配置缺失时继续
-        明确返回 libx264，不能把空值直接交给 MoviePy 或 FFmpeg 自行决定。
+        WebUI 的“默认”模式不会持久化 video_codec。后端必须返回自动探测哨兵，
+        由 effective 解析为可用编码器，不能把空值直接交给 MoviePy 或 FFmpeg。
         """
         config.app.pop("video_codec", None)
 
-        self.assertEqual(vd._get_configured_video_codec(), "libx264")
+        self.assertEqual(vd._get_configured_video_codec(), vd._AUTO_VIDEO_CODEC)
+
+    def test_get_configured_video_codec_accepts_default_sentinel(self):
+        """手工写入 "__default__" 时同样表达自动探测意图。"""
+        config.app["video_codec"] = vd._AUTO_VIDEO_CODEC
+
+        self.assertEqual(vd._get_configured_video_codec(), vd._AUTO_VIDEO_CODEC)
+
+    def test_get_configured_video_codec_rejects_unsupported_value(self):
+        """无效编码器配置必须回退到自动探测，而不是把错误值交给 FFmpeg。"""
+        config.app["video_codec"] = "not-a-real-codec"
+
+        self.assertEqual(vd._get_configured_video_codec(), vd._AUTO_VIDEO_CODEC)
 
     def test_get_configured_video_codec_preserves_explicit_libx264(self):
         """
-        用户明确选择 libx264 时需要保持固定选择。它与“跟随项目默认策略”当前
-        结果相同，但配置语义不同，未来调整默认值时不能影响显式选择。
+        用户明确选择 libx264 时需要保持固定选择。它与“自动探测”当前结果相同，
+        但配置语义不同，未来调整默认值时不能影响显式选择。
         """
         config.app["video_codec"] = "libx264"
 
         self.assertEqual(vd._get_configured_video_codec(), "libx264")
+
+    def test_auto_detect_picks_nvenc_when_gpu_and_encoder_available(self):
+        """
+        NVIDIA GPU + ffmpeg 支持 h264_nvenc 时，未配置编码器应自动选择 NVENC。
+        """
+        config.app.pop("video_codec", None)
+
+        def fake_encoder_exists(ffmpeg_binary, codec):
+            return codec == "h264_nvenc"
+
+        with (
+            patch.object(vd, "_ffmpeg_encoder_exists", side_effect=fake_encoder_exists),
+            patch.object(vd, "_nvidia_gpu_available", return_value=True),
+        ):
+            self.assertEqual(vd._get_effective_video_codec(), "h264_nvenc")
+
+    def test_auto_detect_falls_back_to_libx264_without_hardware(self):
+        """
+        没有可用硬件编码器（无 GPU、无对应 ffmpeg encoder）时，自动探测必须
+        回退到稳定的 libx264。
+        """
+        config.app.pop("video_codec", None)
+
+        with patch.object(vd, "_ffmpeg_encoder_exists", return_value=False):
+            self.assertEqual(vd._get_effective_video_codec(), "libx264")
+
+    def test_auto_detect_ignores_encoder_without_hardware(self):
+        """
+        ffmpeg 声明支持某硬件编码器，但当前机器没有对应硬件时不能选中它。
+        """
+        config.app.pop("video_codec", None)
+
+        def fake_encoder_exists(ffmpeg_binary, codec):
+            return codec == "h264_nvenc"
+
+        with (
+            patch.object(vd, "_ffmpeg_encoder_exists", side_effect=fake_encoder_exists),
+            patch.object(vd, "_nvidia_gpu_available", return_value=False),
+        ):
+            self.assertEqual(vd._get_effective_video_codec(), "libx264")
+
+    def test_explicit_codec_still_wins_over_auto_detection(self):
+        """用户显式配置的编码器优先于自动探测。"""
+        config.app["video_codec"] = "h264_nvenc"
+
+        with (
+            patch.object(vd, "_ffmpeg_encoder_exists", return_value=True),
+            patch.object(vd, "_nvidia_gpu_available", return_value=True),
+        ):
+            self.assertEqual(vd._get_effective_video_codec(), "h264_nvenc")
+
+    def test_runtime_disabled_auto_codec_triggers_redetection(self):
+        """
+        自动选中的硬件编码器在运行时失败被禁用后，必须重新探测而不是继续返回
+        已失效的缓存值。
+        """
+        config.app.pop("video_codec", None)
+        vd._resolved_auto_video_codec = "h264_nvenc"
+        vd._runtime_disabled_video_codecs.add("h264_nvenc")
+
+        with patch.object(vd, "_ffmpeg_encoder_exists", return_value=False):
+            self.assertEqual(vd._get_effective_video_codec(), "libx264")
 
     def test_ffmpeg_encoder_exists_falls_back_when_probe_fails(self):
         """
@@ -867,7 +945,7 @@ class TestVideoService(unittest.TestCase):
     def test_concat_video_clips_limits_output_to_audio_duration(self):
         """最终拼接时应裁到音频时长，避免安全余量带来明显静音尾巴。"""
 
-        def fake_run(command, capture_output, text, check):
+        def fake_run(command, **kwargs):
             return types.SimpleNamespace(returncode=0, stdout="", stderr="")
 
         with tempfile.TemporaryDirectory() as temp_dir:

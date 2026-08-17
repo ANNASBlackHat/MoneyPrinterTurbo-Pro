@@ -473,20 +473,18 @@ class TestConfigPersistence:
 class TestEnvAppOverrides:
     @staticmethod
     def _apply_overrides():
-        config._apply_app_env_override(
-            "pixabay_api_keys", "PIXABAY_API_KEYS", split=True
-        )
-        config._apply_app_env_override("llm_provider", "LLM_PROVIDER")
-        config._apply_app_env_override("gemini_api_key", "GEMINI_API_KEY")
-        config._apply_app_env_override("gemini_model_name", "GEMINI_MODEL_NAME")
+        config._apply_app_env_override("pixabay_api_keys", split=True)
+        config._apply_app_env_override("llm_provider")
+        config._apply_app_env_override("gemini_api_key")
+        config._apply_app_env_override("gemini_model_name")
 
     def test_env_overrides_apply_with_env_precedence(self):
-        """环境变量应覆盖 app 配置，且列表值按逗号解析。"""
+        """环境变量应覆盖 app 配置，列表值兼容 [key-1, key-2] 写法。"""
         env_values = {
-            "PIXABAY_API_KEYS": "key-1, key-2",
-            "LLM_PROVIDER": "gemini",
-            "GEMINI_API_KEY": "env-gemini-key",
-            "GEMINI_MODEL_NAME": "gemini-2.5-pro",
+            "pixabay_api_keys": "[key-1, key-2]",
+            "llm_provider": "gemini",
+            "gemini_api_key": "env-gemini-key",
+            "gemini_model_name": "gemini-2.5-pro",
         }
         original_app = dict(config.app)
         original_overrides = dict(config._ENV_APP_OVERRIDES)
@@ -504,6 +502,34 @@ class TestEnvAppOverrides:
             config._ENV_APP_OVERRIDES.clear()
             config._ENV_APP_OVERRIDES.update(original_overrides)
 
+    def test_single_bracketed_key_is_parsed(self):
+        """单个 [key] 写法也应解析为单元素列表，不残留方括号。"""
+        original_app = dict(config.app)
+        original_overrides = dict(config._ENV_APP_OVERRIDES)
+        try:
+            with patch.dict(config.os.environ, {"pixabay_api_keys": "[single-key]"}):
+                config._apply_app_env_override("pixabay_api_keys", split=True)
+            assert config.app["pixabay_api_keys"] == ["single-key"]
+        finally:
+            config.app.clear()
+            config.app.update(original_app)
+            config._ENV_APP_OVERRIDES.clear()
+            config._ENV_APP_OVERRIDES.update(original_overrides)
+
+    def test_uppercase_env_alias_is_accepted(self):
+        """配置键名未设置时，大写别名（如 LLM_PROVIDER）应被接受。"""
+        original_app = dict(config.app)
+        original_overrides = dict(config._ENV_APP_OVERRIDES)
+        try:
+            with patch.dict(config.os.environ, {"LLM_PROVIDER": "deepseek"}):
+                config._apply_app_env_override("llm_provider")
+            assert config.app["llm_provider"] == "deepseek"
+        finally:
+            config.app.clear()
+            config.app.update(original_app)
+            config._ENV_APP_OVERRIDES.clear()
+            config._ENV_APP_OVERRIDES.update(original_overrides)
+
     def test_empty_env_var_does_not_override_config(self):
         """未设置或为空的变量不能覆盖现有配置。"""
         original_app = dict(config.app)
@@ -512,7 +538,7 @@ class TestEnvAppOverrides:
             config.app["llm_provider"] = "moonshot"
             with patch.dict(
                 config.os.environ,
-                {"LLM_PROVIDER": "", "GEMINI_API_KEY": "   "},
+                {"llm_provider": "", "gemini_api_key": "   "},
                 clear=False,
             ):
                 self._apply_overrides()

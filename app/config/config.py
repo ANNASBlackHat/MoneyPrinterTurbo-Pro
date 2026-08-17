@@ -598,6 +598,7 @@ _apply_app_env_override("pixabay_api_keys", split=True)
 _apply_app_env_override("llm_provider")
 _apply_app_env_override("gemini_api_key")
 _apply_app_env_override("gemini_model_name")
+_apply_app_env_override("video_codec")
 
 ffmpeg_path = app.get("ffmpeg_path", "")
 if ffmpeg_path and os.path.isfile(ffmpeg_path):

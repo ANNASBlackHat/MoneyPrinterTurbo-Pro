@@ -3,6 +3,7 @@ import io
 import os
 import random
 import gc
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -80,6 +81,10 @@ _MIN_MATERIAL_DIMENSION = 480
 # 既能放行仅仅因为取整而略低于阈值的素材，也仍然能挡住真正的低清素材。
 _MIN_DIMENSION_TOLERANCE = 10
 _DEFAULT_VIDEO_CODEC = "libx264"
+# 未配置 video_codec 时的内部哨兵：由 _resolve_auto_video_codec 探测最佳编码器。
+# 与 WebUI 的 DEFAULT_VIDEO_CODEC_OPTION 保持一致的字符串，便于手工配置
+# video_codec = "__default__" 时也能表达同样的“自动探测”意图。
+_AUTO_VIDEO_CODEC = "__default__"
 _SUPPORTED_VIDEO_CODECS = (
     "libx264",
     "h264_nvenc",
@@ -88,7 +93,14 @@ _SUPPORTED_VIDEO_CODECS = (
     "h264_mf",
     "h264_videotoolbox",
 )
+# 自动探测时的候选顺序。_codec_hardware_available 会按平台和硬件再次过滤，
+# 因此顺序只是“都可用时的偏好”。NVENC 优先，覆盖 Colab 等 NVIDIA 场景；
+# VideoToolbox 仅 macOS 可用。
+_AUTO_VIDEO_CODEC_CANDIDATES = ("h264_nvenc", "h264_videotoolbox")
 _runtime_disabled_video_codecs = set()
+# 自动探测结果缓存，避免每个片段写入都重新执行 ffmpeg/nvidia-smi 探测。
+_resolved_auto_video_codec = None
+_nvidia_gpu_state = None
 
 
 def _get_required_video_duration(audio_duration: float) -> float:
@@ -173,17 +185,19 @@ def _get_configured_video_codec() -> str:
 
     该配置面向高级用户，用于尝试启用 NVENC/AMF/QSV/VideoToolbox 等硬件
     编码。这里刻意只允许固定白名单，避免开放任意 FFmpeg 参数后，用户填错
-    参数导致输出格式不可控，甚至让生成任务在后续阶段才失败。
+    参数导致输出格式不可控，甚至让生成任务在后续阶段才失败。未配置或配置
+    无效时返回 ``_AUTO_VIDEO_CODEC`` 哨兵，由 ``_get_effective_video_codec``
+    自动探测最佳编码器。
     """
-    configured_codec = str(
-        config.app.get("video_codec", _DEFAULT_VIDEO_CODEC) or _DEFAULT_VIDEO_CODEC
-    ).strip()
+    configured_codec = str(config.app.get("video_codec", "") or "").strip()
+    if not configured_codec or configured_codec == _AUTO_VIDEO_CODEC:
+        return _AUTO_VIDEO_CODEC
     if configured_codec not in _SUPPORTED_VIDEO_CODECS:
         logger.warning(
             f"unsupported video codec configured: {configured_codec}, "
-            f"fallback to {_DEFAULT_VIDEO_CODEC}"
+            f"fallback to auto detection"
         )
-        return _DEFAULT_VIDEO_CODEC
+        return _AUTO_VIDEO_CODEC
     return configured_codec
 
 
@@ -219,31 +233,104 @@ def _ffmpeg_encoder_exists(ffmpeg_binary: str, codec: str) -> bool:
     return codec in result.stdout
 
 
+def _nvidia_gpu_available() -> bool:
+    """
+    探测当前环境是否存在可用的 NVIDIA GPU。
+
+    只探测不编码：`nvidia-smi -L` 成功且能列出 GPU 时认为驱动与设备可用。
+    探测结果在进程内缓存，因为运行期显卡不会变化；容器内没有 nvidia-smi
+    时再退回到 /dev/nvidia* 设备文件判断。
+    """
+    global _nvidia_gpu_state
+    if _nvidia_gpu_state is not None:
+        return _nvidia_gpu_state
+
+    nvidia_smi = shutil.which("nvidia-smi")
+    if nvidia_smi:
+        try:
+            result = subprocess.run(
+                [nvidia_smi, "-L"],
+                capture_output=True,
+                timeout=5,
+            )
+            _nvidia_gpu_state = result.returncode == 0 and bool(result.stdout.strip())
+            return _nvidia_gpu_state
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+    _nvidia_gpu_state = os.path.exists("/dev/nvidiactl") or os.path.exists(
+        "/dev/nvidia0"
+    )
+    return _nvidia_gpu_state
+
+
+def _codec_hardware_available(codec: str) -> bool:
+    """编码器对应的硬件在当前平台是否可用。"""
+    if codec == "h264_nvenc":
+        return _nvidia_gpu_available()
+    if codec == "h264_videotoolbox":
+        return sys.platform == "darwin"
+    return False
+
+
+def _resolve_auto_video_codec() -> str:
+    """
+    自动选择当前环境最佳的视频编码器。
+
+    依次检查候选硬件编码器的 FFmpeg 支持与硬件可用性，全部不满足时回退到
+    稳定的 libx264。结果在进程内缓存；某个候选在运行时编码失败被禁用后会
+    重新探测，跳过失效编码器。
+    """
+    global _resolved_auto_video_codec
+    if _resolved_auto_video_codec is not None:
+        cached = _resolved_auto_video_codec
+        if cached not in _runtime_disabled_video_codecs:
+            return cached
+
+    ffmpeg_binary = utils.get_ffmpeg_binary()
+    for codec in _AUTO_VIDEO_CODEC_CANDIDATES:
+        if codec in _runtime_disabled_video_codecs:
+            continue
+        if not _ffmpeg_encoder_exists(ffmpeg_binary, codec):
+            continue
+        if not _codec_hardware_available(codec):
+            continue
+        _resolved_auto_video_codec = codec
+        logger.info(f"auto-selected hardware video codec: {codec}")
+        return codec
+
+    _resolved_auto_video_codec = _DEFAULT_VIDEO_CODEC
+    return _DEFAULT_VIDEO_CODEC
+
+
 def _get_effective_video_codec(preferred_codec: str | None = None) -> str:
     """
     返回本次实际使用的视频编码器。
 
-    用户选择硬件编码器时，先做 FFmpeg encoder 列表检测；如果本进程里已经
-    实际编码失败过，也直接回退，避免一个任务里每个片段都重复失败。
+    用户未配置编码器时自动探测可用硬件编码器；显式选择硬件编码器时先做
+    FFmpeg encoder 列表检测；如果本进程里已经实际编码失败过，也直接回退
+    到自动探测，避免一个任务里每个片段都重复失败。
     """
     selected_codec = preferred_codec or _get_configured_video_codec()
+    if selected_codec == _AUTO_VIDEO_CODEC:
+        return _resolve_auto_video_codec()
     if selected_codec == _DEFAULT_VIDEO_CODEC:
         return _DEFAULT_VIDEO_CODEC
 
     if selected_codec in _runtime_disabled_video_codecs:
         logger.warning(
             f"video codec {selected_codec} was disabled after a runtime failure, "
-            f"fallback to {_DEFAULT_VIDEO_CODEC}"
+            f"fallback to auto detection"
         )
-        return _DEFAULT_VIDEO_CODEC
+        return _resolve_auto_video_codec()
 
     ffmpeg_binary = utils.get_ffmpeg_binary()
     if not _ffmpeg_encoder_exists(ffmpeg_binary, selected_codec):
         logger.warning(
             f"ffmpeg encoder {selected_codec} is not available, "
-            f"fallback to {_DEFAULT_VIDEO_CODEC}"
+            f"fallback to auto detection"
         )
-        return _DEFAULT_VIDEO_CODEC
+        return _resolve_auto_video_codec()
 
     return selected_codec
 
