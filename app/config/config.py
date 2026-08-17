@@ -11,6 +11,7 @@ import toml
 from loguru import logger
 
 from app import __version__
+from app.utils import utils
 
 root_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 config_file = f"{root_dir}/config.toml"
@@ -603,5 +604,14 @@ _apply_app_env_override("video_codec")
 ffmpeg_path = app.get("ffmpeg_path", "")
 if ffmpeg_path and os.path.isfile(ffmpeg_path):
     os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_path
+
+# 未显式配置时，也把 MoviePy/imageio 对齐到项目解析出的同一个 FFmpeg 二进制。
+# imageio 未设置 IMAGEIO_FFMPEG_EXE 时只会使用内置二进制，而
+# utils.get_ffmpeg_binary() 可能优先解析到系统 FFmpeg（例如系统 ffmpeg 支持
+# h264_nvenc，而内置二进制不支持）。两个二进制不一致会让编码器探测通过、实际
+# 写文件却报 "Unknown encoder"，因此自动探测必须与 MoviePy 写文件使用同一套
+# 可执行文件。
+if not os.environ.get("IMAGEIO_FFMPEG_EXE"):
+    os.environ["IMAGEIO_FFMPEG_EXE"] = utils.get_ffmpeg_binary()
 
 logger.info(f"{project_name} v{project_version}")
