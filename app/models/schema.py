@@ -271,6 +271,10 @@ class TaskStatusData(BaseModel):
     ] = None
     cross_post_results: Optional[List[dict[str, Any]]] = None
     cross_post_error: Optional[str] = None
+    telegram_state: Optional[
+        Literal["pending", "processing", "complete", "failed"]
+    ] = None
+    telegram_error: Optional[str] = None
 
 
 class TaskListData(BaseModel):
@@ -284,10 +288,11 @@ class TaskListData(BaseModel):
 
 class TaskQueryResponse(BaseResponse):
     """
-    任务查询会返回生成状态和可选的跨平台发布状态。
+    任务查询会返回生成状态和可选的发布状态（跨平台发布、Telegram）。
 
     生成失败时包含 `failed_stage` 和 `error`；生成完成后如果启用了自动发布，
     `cross_post_state` 会依次进入 pending、processing、complete 或 failed。
+    Telegram 发送结果记录在 `telegram_state` 与 `telegram_error`。
     """
 
     data: TaskStatusData

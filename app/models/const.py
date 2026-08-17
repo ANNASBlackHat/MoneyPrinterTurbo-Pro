@@ -31,5 +31,10 @@ CROSS_POST_STATE_PROCESSING = "processing"
 CROSS_POST_STATE_COMPLETE = "complete"
 CROSS_POST_STATE_FAILED = "failed"
 
+TELEGRAM_STATE_PENDING = "pending"
+TELEGRAM_STATE_PROCESSING = "processing"
+TELEGRAM_STATE_COMPLETE = "complete"
+TELEGRAM_STATE_FAILED = "failed"
+
 FILE_TYPE_VIDEOS = ["mp4", "mov", "mkv", "webm"]
 FILE_TYPE_IMAGES = ["jpg", "jpeg", "png", "bmp"]

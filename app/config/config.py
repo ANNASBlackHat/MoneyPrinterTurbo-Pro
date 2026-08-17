@@ -600,6 +600,8 @@ _apply_app_env_override("llm_provider")
 _apply_app_env_override("gemini_api_key")
 _apply_app_env_override("gemini_model_name")
 _apply_app_env_override("video_codec")
+_apply_app_env_override("telegram_bot_token")
+_apply_app_env_override("telegram_chat_id")
 
 ffmpeg_path = app.get("ffmpeg_path", "")
 if ffmpeg_path and os.path.isfile(ffmpeg_path):

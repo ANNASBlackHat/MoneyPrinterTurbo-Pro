@@ -1054,6 +1054,126 @@ class TestTaskService(unittest.TestCase):
             published_task["cross_post_state"], tm.const.CROSS_POST_STATE_COMPLETE
         )
 
+    def test_start_schedules_telegram_post_after_completion(self):
+        """Telegram 启用时视频完成即提交后台发送，不阻塞生成线程。"""
+        params = VideoParams(video_subject="Coffee")
+        service = tm.telegram_service.telegram_service
+        state = MemoryState()
+        submitted = []
+
+        def capture_submission(function, *args):
+            submitted.append((function, args))
+            return MagicMock(spec=Future)
+
+        with (
+            patch.object(tm, "generate_script", return_value="generated script"),
+            patch.object(tm, "generate_terms", return_value=["coffee"]),
+            patch.object(tm, "save_script_data"),
+            patch.object(
+                tm,
+                "generate_audio",
+                return_value=("audio.mp3", 5, object()),
+            ),
+            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
+            patch.object(
+                tm,
+                "generate_final_videos",
+                return_value=(["final.mp4"], ["combined.mp4"], []),
+            ),
+            patch.object(service, "is_configured", return_value=True),
+            patch.object(tm.sm, "state", state),
+            patch.object(
+                tm._telegram_executor,
+                "submit",
+                side_effect=capture_submission,
+            ) as submit,
+        ):
+            result = tm.start("deferred-telegram", params)
+
+        submit.assert_called_once()
+        self.assertEqual(result["telegram_state"], tm.const.TELEGRAM_STATE_PENDING)
+        self.assertIsNone(result["telegram_error"])
+        self.assertEqual(result["videos"], ["final.mp4"])
+        completed_task = state.get_task("deferred-telegram")
+        self.assertEqual(completed_task["state"], tm.const.TASK_STATE_COMPLETE)
+
+        worker, worker_args = submitted[0]
+        with (
+            patch.object(tm.sm, "state", state),
+            patch.object(
+                tm.telegram_service,
+                "send_telegram_video",
+                return_value={"success": True},
+            ),
+        ):
+            worker(*worker_args)
+
+        published_task = state.get_task("deferred-telegram")
+        self.assertEqual(
+            published_task["telegram_state"], tm.const.TELEGRAM_STATE_COMPLETE
+        )
+        self.assertIsNone(published_task["telegram_error"])
+
+    def test_start_without_telegram_config_keeps_state_empty(self):
+        """Telegram 未启用时不提交发送任务，也不写入发布状态。"""
+        params = VideoParams(video_subject="Coffee")
+        service = tm.telegram_service.telegram_service
+        state = MemoryState()
+
+        with (
+            patch.object(tm, "generate_script", return_value="generated script"),
+            patch.object(tm, "generate_terms", return_value=["coffee"]),
+            patch.object(tm, "save_script_data"),
+            patch.object(
+                tm,
+                "generate_audio",
+                return_value=("audio.mp3", 5, object()),
+            ),
+            patch.object(tm, "generate_subtitle", return_value="subtitle.srt"),
+            patch.object(tm, "get_video_materials", return_value=["clip.mp4"]),
+            patch.object(
+                tm,
+                "generate_final_videos",
+                return_value=(["final.mp4"], ["combined.mp4"], []),
+            ),
+            patch.object(service, "is_configured", return_value=False),
+            patch.object(tm.sm, "state", state),
+            patch.object(tm._telegram_executor, "submit") as submit,
+        ):
+            result = tm.start("no-telegram", params)
+
+        submit.assert_not_called()
+        self.assertIsNone(result["telegram_state"])
+        self.assertIsNone(result["telegram_error"])
+
+    def test_run_telegram_post_failure_records_error(self):
+        """发送失败只能写入 telegram 失败状态，不能影响已完成的视频结果。"""
+        state = MemoryState()
+        state.update_task(
+            "telegram-worker-failure",
+            state=tm.const.TASK_STATE_COMPLETE,
+            progress=100,
+            videos=["final.mp4"],
+            telegram_state=tm.const.TELEGRAM_STATE_PENDING,
+        )
+
+        with (
+            patch.object(tm.sm, "state", state),
+            patch.object(
+                tm.telegram_service,
+                "send_telegram_video",
+                return_value={"success": False, "error": "chat not found"},
+            ),
+        ):
+            tm._run_telegram_post("telegram-worker-failure", ("final.mp4",), "Coffee", "script")
+
+        task = state.get_task("telegram-worker-failure")
+        self.assertEqual(task["state"], tm.const.TASK_STATE_COMPLETE)
+        self.assertEqual(task["videos"], ["final.mp4"])
+        self.assertEqual(task["telegram_state"], tm.const.TELEGRAM_STATE_FAILED)
+        self.assertIn("chat not found", task["telegram_error"])
+
     def test_cross_post_worker_failure_does_not_change_video_completion(self):
         """发布线程异常只能更新发布状态，不能破坏已完成的视频结果。"""
         state = MemoryState()

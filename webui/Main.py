@@ -1952,12 +1952,14 @@ def _render_settings_dialog():
             right_config_panel,
             cache_config_panel,
             left_config_panel,
+            publish_config_panel,
         ) = st.tabs(
             [
                 tr("LLM Settings Tab"),
                 tr("Material API Tab"),
                 tr("Cache Management Tab"),
                 tr("Interface Settings Tab"),
+                tr("Publishing Settings Tab"),
             ]
         )
 
@@ -2196,6 +2198,32 @@ def _render_settings_dialog():
                 key="coverr_api_keys_input",
             )
             _save_material_api_keys("coverr_api_keys", coverr_api_key)
+
+        # 发布设置面板 - 视频完成后发送到 Telegram
+        with publish_config_panel:
+            telegram_enabled = st.checkbox(
+                tr("Send Video to Telegram"),
+                value=config.app.get("telegram_enabled", False),
+                key="telegram_enabled_checkbox",
+            )
+            _set_runtime_config("app", "telegram_enabled", telegram_enabled)
+
+            telegram_bot_token = st.text_input(
+                tr("Telegram Bot Token"),
+                value=config.app.get("telegram_bot_token", ""),
+                type="password",
+                key="telegram_bot_token_input",
+            )
+            _set_runtime_config("app", "telegram_bot_token", telegram_bot_token)
+
+            telegram_chat_id = st.text_input(
+                tr("Telegram Chat ID"),
+                value=config.app.get("telegram_chat_id", ""),
+                key="telegram_chat_id_input",
+            )
+            _set_runtime_config("app", "telegram_chat_id", telegram_chat_id)
+
+            st.caption(tr("Telegram Settings Hint"))
 
     _save_runtime_config()
 

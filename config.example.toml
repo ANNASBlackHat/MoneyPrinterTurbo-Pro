@@ -274,6 +274,13 @@ upload_post_youtube_privacy_status = "public"
 # Cross-post jobs run in the current process and are not resumed after restart.
 upload_post_max_pending_tasks = 10
 
+# Send the generated video to a Telegram chat or channel after completion.
+# Create a bot with @BotFather, then send any message to the bot and get your
+# chat ID via @userinfobot (or use the channel/group ID). No OAuth required.
+telegram_enabled = false
+telegram_bot_token = ""
+telegram_chat_id = ""
+
 # =============================================================================
 # Whisper Subtitles / Whisper 字幕
 # =============================================================================

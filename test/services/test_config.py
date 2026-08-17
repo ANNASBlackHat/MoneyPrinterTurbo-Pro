@@ -76,6 +76,18 @@ class TestConfigPersistence:
         assert upload_post_keys <= example_config["app"].keys()
         assert upload_post_keys.isdisjoint(example_config.get("ui", {}).keys())
 
+    def test_telegram_settings_belong_to_app_section(self):
+        """Telegram 发布配置必须位于 app 节点，与运行时读取路径保持一致。"""
+        example_config = self._load_example_config()
+        telegram_keys = {
+            "telegram_enabled",
+            "telegram_bot_token",
+            "telegram_chat_id",
+        }
+
+        assert telegram_keys <= example_config["app"].keys()
+        assert telegram_keys.isdisjoint(example_config.get("ui", {}).keys())
+
     def test_save_config_uses_parseable_atomic_output(self):
         """
         配置保存先写临时文件再原子替换。测试同时确认输出仍是合法 TOML，

@@ -27,6 +27,7 @@ from app.services import (
     voice,
 )
 from app.services import upload_post
+from app.services import telegram as telegram_service
 from app.services import state as sm
 from app.utils import file_security, utils
 
@@ -37,6 +38,12 @@ from app.utils import file_security, utils
 _cross_post_executor = ThreadPoolExecutor(
     max_workers=2,
     thread_name_prefix="mpt-cross-post",
+)
+# Telegram 发送同样在后台执行，避免网络等待拖慢生成完成。使用独立的
+# 小线程池，与跨平台发布互不抢占，也便于单独诊断发送问题。
+_telegram_executor = ThreadPoolExecutor(
+    max_workers=2,
+    thread_name_prefix="mpt-telegram",
 )
 _cross_post_max_pending_tasks = max(
     1,
@@ -1040,6 +1047,101 @@ def _schedule_cross_post(
     return None
 
 
+def _run_telegram_post(
+    task_id: str,
+    video_paths: tuple[str, ...],
+    video_subject: str,
+    video_script: str,
+) -> None:
+    """后台把每个成片连同文案和脚本发送到 Telegram，只补充发布相关字段。
+
+    Telegram 发送不参与任务繁忙判定，也不做进程重启恢复：发送本身就是
+    尽力而为的通知，任务在发送前已经处于完成状态，中途失败只记录结果。
+    """
+    results = []
+    try:
+        _patch_cross_post_state(
+            task_id,
+            telegram_state=const.TELEGRAM_STATE_PROCESSING,
+            telegram_error=None,
+        )
+        logger.info(f"telegram post started, task_id: {task_id}")
+
+        for video_path in video_paths:
+            result = telegram_service.send_telegram_video(
+                video_path=video_path,
+                video_subject=video_subject,
+                video_script=video_script,
+            )
+            if not isinstance(result, dict):
+                result = {
+                    "success": False,
+                    "error": "Telegram returned an invalid response",
+                }
+            results.append(result)
+
+        failures = [result for result in results if not result.get("success")]
+        if failures:
+            telegram_state = const.TELEGRAM_STATE_FAILED
+            telegram_error = "; ".join(
+                str(
+                    result.get("error")
+                    or result.get("description")
+                    or "unknown telegram error"
+                )
+                for result in failures
+            )
+            logger.warning(
+                f"telegram post completed with failures, task_id: {task_id}, "
+                f"failed: {len(failures)}, total: {len(results)}"
+            )
+        else:
+            telegram_state = const.TELEGRAM_STATE_COMPLETE
+            telegram_error = None
+            logger.success(
+                f"telegram post completed, task_id: {task_id}, videos: {len(results)}"
+            )
+
+        _patch_cross_post_state(
+            task_id,
+            telegram_state=telegram_state,
+            telegram_error=telegram_error,
+        )
+    except Exception as exc:
+        logger.exception(f"telegram post failed, task_id: {task_id}, error: {exc}")
+        _patch_cross_post_state(
+            task_id,
+            telegram_state=const.TELEGRAM_STATE_FAILED,
+            telegram_error=str(exc),
+        )
+
+
+def _schedule_telegram_post(
+    task_id: str,
+    video_paths: list[str],
+    video_subject: str,
+    video_script: str,
+) -> None:
+    """提交后台 Telegram 发送；调度异常就地记录为失败状态。"""
+    try:
+        _telegram_executor.submit(
+            _run_telegram_post,
+            task_id,
+            tuple(video_paths),
+            video_subject or "",
+            video_script or "",
+        )
+    except Exception as exc:
+        logger.exception(
+            f"failed to schedule telegram post, task_id: {task_id}, error: {exc}"
+        )
+        _patch_cross_post_state(
+            task_id,
+            telegram_state=const.TELEGRAM_STATE_FAILED,
+            telegram_error=f"failed to schedule telegram post: {exc}",
+        )
+
+
 def _run_pipeline(
     task_id,
     params: VideoParams,
@@ -1234,6 +1336,8 @@ def _run_pipeline(
         )
     cross_post_state = const.CROSS_POST_STATE_PENDING if should_cross_post else None
 
+    telegram_enabled = telegram_service.telegram_service.is_configured()
+
     kwargs = {
         "videos": final_video_paths,
         "combined_videos": combined_video_paths,
@@ -1248,10 +1352,20 @@ def _run_pipeline(
         "cross_post_error": None,
         "cross_post_owner": _cross_post_process_owner if should_cross_post else None,
         "warnings": generation_warnings or None,
+        "telegram_state": const.TELEGRAM_STATE_PENDING if telegram_enabled else None,
+        "telegram_error": None,
     }
     sm.state.update_task(
         task_id, state=const.TASK_STATE_COMPLETE, progress=100, **kwargs
     )
+
+    if telegram_enabled:
+        _schedule_telegram_post(
+            task_id=task_id,
+            video_paths=final_video_paths,
+            video_subject=params.video_subject,
+            video_script=video_script,
+        )
 
     if should_cross_post:
         scheduling_error = _schedule_cross_post(
