@@ -356,6 +356,60 @@ uv run python cli.py --video-subject "人工智能如何改变日常生活"
 uv run python cli.py --help
 ```
 
+##### ⑤ 命令行完整示例：主题生成脚本 + Pixabay 素材 + 横屏 + Azure TTS V2
+
+以下示例演示：只输入视频主题，由 LLM 自动生成脚本；素材来自 Pixabay 并按文案叙事顺序匹配；输出横屏 16:9；配音使用 Azure TTS V2；字幕使用默认内置字体。
+
+先编辑 `config.toml`，配置好 LLM、Pixabay、Azure 语音和硬件编码：
+
+```toml
+# LLM：选择一个已配置的 Provider 并填入对应 API Key，例如 openai / moonshot / deepseek / qwen
+llm_provider = "openai"
+
+# Pixabay 素材 API Key
+pixabay_api_keys = ["your-pixabay-key"]
+
+# 让素材顺序贴近文案叙事顺序（减少随机性，画面跟随旁白）
+match_materials_to_script = true
+
+# GPU 硬件编码：macOS 使用 h264_videotoolbox；NVIDIA 使用 h264_nvenc
+video_codec = "h264_videotoolbox"
+
+[azure]
+speech_key = "your-azure-speech-key"
+speech_region = "eastus"
+```
+
+然后执行：
+
+```shell
+uv run python cli.py \
+  --video-subject "人工智能如何改变日常生活" \
+  --video-source pixabay \
+  --video-aspect 16:9 \
+  --match-materials-to-script \
+  --voice-name "en-US-AvaMultilingualNeural-V2-Female" \
+  --bgm-type none \
+  --n-threads 4
+```
+
+说明：
+
+- 成功后会在终端打印包含 `task_id` 的 JSON，最终视频位于 `storage/tasks/<task_id>/final-1.mp4`。
+- 字幕默认使用内置字体（`STHeitiMedium.ttc`），无需额外配置；如需关闭字幕可加 `--no-subtitle-enabled`。
+- **Azure TTS V2 音色名称必须以 `-V2` 结尾**（例如 `en-US-AvaMultilingualNeural-V2-Female`），才会走 Azure Speech SDK 并使用 `[azure]` 中的凭据；普通音色名称（如 `zh-CN-XiaoxiaoNeural-Female`）默认走免费 Edge TTS。
+- `--match-materials-to-script` 会按文案顺序生成关键词，并按顺序轮询下载素材，保证画面跟随旁白节奏。
+- 硬件编码可选值：`h264_videotoolbox`（macOS）、`h264_nvenc`（NVIDIA）、`h264_qsv`（Intel 核显）、`h264_amf`（AMD），未启用时自动回退 CPU 编码。
+- 生成多个候选视频可加 `--video-count 3`；控制脚本段落数可加 `--paragraph-number 3`。
+
+> Intel 芯片 macOS 安装提示：`uv sync` 会因 `faster-whisper` 依赖的 `onnxruntime` 缺少 x86_64 版本 wheel 而失败。如果不需要 Whisper 字幕，可以直接用 `venv + pip` 安装除 `faster-whisper` 外的其余依赖：
+
+> ```shell
+> python3 -m venv .venv
+> source .venv/bin/activate
+> pip install moviepy==2.2.1 streamlit==1.59.1 streamlit-tour==1.1.0 edge-tts==7.2.7 fastapi==0.136.3 uvicorn==0.32.1 openai==2.24.0 loguru==0.7.3 dashscope==1.20.14 azure-cognitiveservices-speech==1.41.1 redis==5.2.0 python-multipart==0.0.27 pyyaml==6.0.3 requests==2.33.1 packaging==24.2 socksio==1.0.0 pydub==0.25.1 litellm==1.86.2 google-genai==2.11.0 toml
+> ```
+
 ## 语音合成 🗣
 
 默认使用免费的 **Edge TTS**，在 WebUI 中显示为 **Azure TTS V1**。项目同时支持 **Azure TTS V2**、**SiliconFlow TTS**、**Google Gemini TTS**、**小米 MiMo TTS**、**ElevenLabs TTS**、自托管 **Chatterbox TTS**，以及无配音模式。

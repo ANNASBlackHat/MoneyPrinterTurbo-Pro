@@ -592,6 +592,94 @@ def _strip_code_fence(text: str) -> str:
     return t.strip()
 
 
+# 抽象的“过程/概念/趋势”后缀词。独立用作搜索词时，Pixabay/Pexels 等素材站
+# 经常匹配到语义漂移的画面（例如 "muscle growth" 返回植物生长的片段），
+# 而不是真正的主体。短语以这些词结尾时，具体主体通常是它前面的那个词。
+_GENERIC_NOUN_SUFFIXES = {
+    "application",
+    "advancement",
+    "benefits",
+    "change",
+    "concept",
+    "culture",
+    "decline",
+    "development",
+    "effect",
+    "era",
+    "evolution",
+    "experience",
+    "exploration",
+    "future",
+    "growth",
+    "impact",
+    "importance",
+    "industry",
+    "innovation",
+    "journey",
+    "lifestyle",
+    "power",
+    "process",
+    "progress",
+    "revolution",
+    "rise",
+    "role",
+    "technology",
+    "theory",
+    "transformation",
+    "world",
+}
+
+
+def _reduce_search_term(term: str) -> str:
+    """
+    把多词短语压缩成素材站更适合检索的单个具体名词。
+
+    规则（确定性，无额外依赖）：
+    - 已经是单个单词时原样保留；
+    - 短语以抽象后缀词结尾（muscle growth / space exploration）时，
+      保留后缀前面那个词，也就是真正的主体；
+    - 其它三个词以上的短语保留最后一个词（英语名词短语的中心名词）；
+    - 恰好两个词且结尾不是抽象后缀时原样保留，覆盖 "new york"、
+      "ocean wave" 这类需要整体检索的词组。
+    """
+    tokens = re.findall(r"[A-Za-z]+", term)
+    if len(tokens) <= 1:
+        return (term or "").strip()
+
+    last = tokens[-1].lower()
+    if last in _GENERIC_NOUN_SUFFIXES:
+        return tokens[-2] if len(tokens) >= 2 else tokens[0]
+    if len(tokens) > 2:
+        return tokens[-1]
+    return (term or "").strip()
+
+
+def _postprocess_search_terms(terms: list[str]) -> list[str]:
+    """
+    压缩模型返回的搜索词，并去掉压缩后重复的项。
+
+    提示词已经要求单数单词，这里作为最后防线兜住不守规矩的模型输出，
+    避免多词短语进入素材搜索后引发完全不匹配的结果。保持原有顺序，
+    让按脚本文案顺序匹配素材的功能不受影响。
+    """
+    cleaned = []
+    seen = set()
+    for term in terms:
+        if not isinstance(term, str) or not term.strip():
+            continue
+        reduced = _reduce_search_term(term)
+        key = reduced.strip().lower()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        if reduced != term:
+            logger.info(
+                f"reduce search term: {term!r} -> {reduced!r}"
+            )
+        cleaned.append(reduced)
+    return cleaned
+
+
 def generate_terms(
     video_subject: str,
     video_script: str,
@@ -601,8 +689,8 @@ def generate_terms(
 ) -> List[str]:
     if match_script_order:
         goal = (
-            f"Generate {amount} chronological stock-video search terms that follow "
-            "the order of topics in the video script."
+            f"Generate {amount} chronological single-word stock-video search "
+            "terms that follow the order of topics in the video script."
         )
         ordering_rule = (
             "6. keep the terms in the same order as the script narration; "
@@ -610,21 +698,21 @@ def generate_terms(
         )
         # 有序关键词模式下，示例数量要和 amount 保持一致，避免模型被固定
         # 的 4 个示例误导，导致长文案只返回少量关键词，影响素材覆盖度。
+        # 示例只演示“顺序 + 单数单词”两种格式要求，词本身没有实际含义。
         example_terms = [
-            "opening visual topic",
-            *[f"script visual topic {index}" for index in range(2, max(amount, 1))],
-            "final visual topic",
+            "opening",
+            *[f"topic{index}" for index in range(2, max(amount, 1))],
+            "final",
         ]
         output_example = json.dumps(example_terms[:amount], ensure_ascii=False)
     else:
         goal = (
-            f"Generate {amount} search terms for stock videos, depending on the "
-            "subject of a video."
+            f"Generate {amount} single-word stock-video search terms, each naming "
+            "one concrete object or scene, depending on the subject of a video."
         )
         ordering_rule = ""
         output_example = (
-            '["search term 1", "search term 2", "search term 3",'
-            '"search term 4", "search term 5"]'
+            '["mountain", "rain", "robot", "city", "ocean"]'
         )
 
     prompt = f"""
@@ -635,7 +723,7 @@ def generate_terms(
 
 ## Constrains:
 1. the search terms are to be returned as a json-array of strings.
-2. each search term should consist of 1-3 words, always add the main subject of the video.
+2. each search term must be a SINGLE word that names one concrete, visually-distinct object or scene that stock-video sites index well (for example 'muscle', not 'muscle growth'; 'rain', not 'rainy weather'). use at most two words only when a single word would be ambiguous.
 3. you must only return the json-array of strings. you must not return anything else. you must not return the script.
 4. the search terms must be related to the subject of the video.
 5. reply with english search terms only.
@@ -651,7 +739,7 @@ def generate_terms(
 ### Video Script
 {video_script}
 
-Please note that you must use English for generating video search terms; Chinese is not accepted.
+Please note that you must use English for generating video search terms; Chinese is not accepted. Stock-video search engines (Pexels, Pixabay, Coverr) return the most relevant footage for a single concrete noun, so never add descriptive adjectives or phrases to a term.
 """.strip()
 
     logger.info(f"subject: {video_subject}, match_script_order: {match_script_order}")
@@ -696,6 +784,8 @@ Please note that you must use English for generating video search terms; Chinese
         if i < _max_retries:
             logger.warning(f"failed to generate video terms, trying again... {i + 1}")
 
+    if search_terms:
+        search_terms = _postprocess_search_terms(search_terms)
     logger.success(f"completed: \n{search_terms}")
     return search_terms
 
