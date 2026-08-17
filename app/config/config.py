@@ -23,6 +23,43 @@ _pending_config_save_requested = False
 _pending_config_flush_scheduled = False
 _MISSING = object()
 _DELETE = object()
+# app 配置项在进程启动时被环境变量覆盖的映射。这些值优先于 config.toml，
+# 但 save_config 不会把它们写回文件（除非用户在 WebUI 中显式改成了其它值）。
+_ENV_APP_OVERRIDES: dict[str, object] = {}
+
+
+def _apply_app_env_override(config_key: str, *, split: bool = False) -> None:
+    """
+    将环境变量作为 app 配置的只读覆盖值。
+
+    环境变量优先于 config.toml，但不会通过 save_config 写回文件；WebUI 手动
+    修改同一配置项后新值才会落盘，进程重启后环境变量重新生效。变量名优先使用
+    与 config.toml 相同的配置键名（例如 ``llm_provider``），也接受对应的大写
+    形式（``LLM_PROVIDER``）作为别名，便于容器部署。``split`` 用于解析列表值
+    （例如素材 API Key 列表），兼容 ``[key]``、``[key-1, key-2]`` 与裸逗号分隔。
+    """
+    env_name = config_key
+    raw_value = os.getenv(config_key)
+    if not raw_value or not raw_value.strip():
+        env_name = config_key.upper()
+        raw_value = os.getenv(env_name)
+    raw_value = (raw_value or "").strip()
+    if not raw_value:
+        return
+
+    if split:
+        list_body = raw_value
+        if list_body.startswith("[") and list_body.endswith("]"):
+            list_body = list_body[1:-1]
+        parsed_value = [item.strip() for item in list_body.split(",") if item.strip()]
+        if not parsed_value:
+            return
+    else:
+        parsed_value = raw_value
+
+    app[config_key] = parsed_value
+    _ENV_APP_OVERRIDES[config_key] = parsed_value
+    logger.info(f"overriding app.{config_key} from environment variable {env_name}")
 
 
 class _SynchronizedConfig(dict):
@@ -461,6 +498,15 @@ def save_config():
     with _config_save_lock:
         config_to_save = dict(_cfg)
         config_to_save["app"] = dict(app)
+        # 未被用户修改的环境变量覆盖值不回写文件：保留原始文件值；如果原始
+        # 文件本来没有该键，则同样不写入。用户改成与覆盖值不同的新值后才会落盘。
+        original_app = dict(_cfg.get("app", {}))
+        for key, env_value in _ENV_APP_OVERRIDES.items():
+            if config_to_save["app"].get(key) == env_value:
+                if key in original_app:
+                    config_to_save["app"][key] = original_app[key]
+                else:
+                    config_to_save["app"].pop(key, None)
         config_to_save["azure"] = dict(azure)
         config_to_save["siliconflow"] = dict(siliconflow)
         config_to_save["minimax_tts"] = dict(minimax_tts)
@@ -547,6 +593,11 @@ app["redis_host"] = os.getenv(
     "MPT_APP_REDIS_HOST",
     os.getenv("REDIS_HOST", app.get("redis_host", "localhost")),
 )
+
+_apply_app_env_override("pixabay_api_keys", split=True)
+_apply_app_env_override("llm_provider")
+_apply_app_env_override("gemini_api_key")
+_apply_app_env_override("gemini_model_name")
 
 ffmpeg_path = app.get("ffmpeg_path", "")
 if ffmpeg_path and os.path.isfile(ffmpeg_path):

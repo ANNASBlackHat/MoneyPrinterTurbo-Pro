@@ -468,3 +468,125 @@ class TestConfigPersistence:
                     config.app.pop(key, None)
                 else:
                     config.app[key] = original_value
+
+
+class TestEnvAppOverrides:
+    @staticmethod
+    def _apply_overrides():
+        config._apply_app_env_override(
+            "pixabay_api_keys", "PIXABAY_API_KEYS", split=True
+        )
+        config._apply_app_env_override("llm_provider", "LLM_PROVIDER")
+        config._apply_app_env_override("gemini_api_key", "GEMINI_API_KEY")
+        config._apply_app_env_override("gemini_model_name", "GEMINI_MODEL_NAME")
+
+    def test_env_overrides_apply_with_env_precedence(self):
+        """环境变量应覆盖 app 配置，且列表值按逗号解析。"""
+        env_values = {
+            "PIXABAY_API_KEYS": "key-1, key-2",
+            "LLM_PROVIDER": "gemini",
+            "GEMINI_API_KEY": "env-gemini-key",
+            "GEMINI_MODEL_NAME": "gemini-2.5-pro",
+        }
+        original_app = dict(config.app)
+        original_overrides = dict(config._ENV_APP_OVERRIDES)
+        try:
+            with patch.dict(config.os.environ, env_values):
+                self._apply_overrides()
+
+            assert config.app["pixabay_api_keys"] == ["key-1", "key-2"]
+            assert config.app["llm_provider"] == "gemini"
+            assert config.app["gemini_api_key"] == "env-gemini-key"
+            assert config.app["gemini_model_name"] == "gemini-2.5-pro"
+        finally:
+            config.app.clear()
+            config.app.update(original_app)
+            config._ENV_APP_OVERRIDES.clear()
+            config._ENV_APP_OVERRIDES.update(original_overrides)
+
+    def test_empty_env_var_does_not_override_config(self):
+        """未设置或为空的变量不能覆盖现有配置。"""
+        original_app = dict(config.app)
+        original_overrides = dict(config._ENV_APP_OVERRIDES)
+        try:
+            config.app["llm_provider"] = "moonshot"
+            with patch.dict(
+                config.os.environ,
+                {"LLM_PROVIDER": "", "GEMINI_API_KEY": "   "},
+                clear=False,
+            ):
+                self._apply_overrides()
+
+            assert config.app["llm_provider"] == "moonshot"
+            assert config.app.get("gemini_api_key", "") == config.app.get(
+                "gemini_api_key", ""
+            )
+        finally:
+            config.app.clear()
+            config.app.update(original_app)
+            config._ENV_APP_OVERRIDES.clear()
+            config._ENV_APP_OVERRIDES.update(original_overrides)
+
+    def test_save_config_keeps_env_override_out_of_file(self):
+        """未修改的环境变量覆盖值不落盘，并保留原始文件值。"""
+        original_app = dict(config.app)
+        original_cfg = dict(config._cfg)
+        original_overrides = dict(config._ENV_APP_OVERRIDES)
+        try:
+            config.app["llm_provider"] = "moonshot"
+            config.app["gemini_api_key"] = "file-key"
+            config._cfg["app"] = dict(config.app)
+            # 模拟进程启动时环境变量覆盖生效
+            config._ENV_APP_OVERRIDES["llm_provider"] = "gemini"
+            config.app["llm_provider"] = "gemini"
+            config._ENV_APP_OVERRIDES["gemini_api_key"] = "env-key"
+            config.app["gemini_api_key"] = "env-key"
+
+            with TemporaryDirectory() as temp_dir:
+                config_path = Path(temp_dir) / "config.toml"
+                with (
+                    patch.object(config, "root_dir", temp_dir),
+                    patch.object(config, "config_file", str(config_path)),
+                ):
+                    config.save_config()
+
+                saved_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                assert saved_config["app"]["llm_provider"] == "moonshot"
+                assert saved_config["app"]["gemini_api_key"] == "file-key"
+        finally:
+            config.app.clear()
+            config.app.update(original_app)
+            config._cfg.clear()
+            config._cfg.update(original_cfg)
+            config._ENV_APP_OVERRIDES.clear()
+            config._ENV_APP_OVERRIDES.update(original_overrides)
+
+    def test_save_config_persists_user_change_over_env_override(self):
+        """用户在 WebUI 中改出的新值应覆盖环境变量并落盘。"""
+        original_app = dict(config.app)
+        original_cfg = dict(config._cfg)
+        original_overrides = dict(config._ENV_APP_OVERRIDES)
+        try:
+            config._cfg["app"] = {"llm_provider": "moonshot"}
+            config._ENV_APP_OVERRIDES["llm_provider"] = "gemini"
+            config.app["llm_provider"] = "gemini"
+            # 用户在界面中选择了与覆盖值不同的 Provider
+            config.app["llm_provider"] = "deepseek"
+
+            with TemporaryDirectory() as temp_dir:
+                config_path = Path(temp_dir) / "config.toml"
+                with (
+                    patch.object(config, "root_dir", temp_dir),
+                    patch.object(config, "config_file", str(config_path)),
+                ):
+                    config.save_config()
+
+                saved_config = tomllib.loads(config_path.read_text(encoding="utf-8"))
+                assert saved_config["app"]["llm_provider"] == "deepseek"
+        finally:
+            config.app.clear()
+            config.app.update(original_app)
+            config._cfg.clear()
+            config._cfg.update(original_cfg)
+            config._ENV_APP_OVERRIDES.clear()
+            config._ENV_APP_OVERRIDES.update(original_overrides)
